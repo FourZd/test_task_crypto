@@ -6,6 +6,7 @@ from typing import Annotated
 from web3 import AsyncWeb3
 from core.environment.config import Settings
 from core.redis.providers import CacheService
+import logging
 
 
 class BlockchainProvider(Provider):
@@ -44,7 +45,8 @@ class BlockchainProvider(Provider):
         self,
         web3_clients: Annotated[
             dict[str, AsyncWeb3], FromComponent("blockchain")
-        ]
+        ],
+        logger: Annotated[logging.Logger, FromComponent("logger")]
     ) -> Web3Service:
         """
         Provide Web3 service.
@@ -53,20 +55,23 @@ class BlockchainProvider(Provider):
         ----------
         web3_clients : dict[str, AsyncWeb3]
             Dictionary of Web3 clients
+        logger : logging.Logger
+            Logger instance
             
         Returns
         -------
         Web3Service
             Web3 service instance
         """
-        return Web3Service(web3_clients=web3_clients)
+        return Web3Service(web3_clients=web3_clients, logger=logger)
     
     @provide(scope=Scope.APP)
     def get_abi_service(
         self,
         cache_service: Annotated[
             CacheService, FromComponent("cache")
-        ]
+        ],
+        logger: Annotated[logging.Logger, FromComponent("logger")]
     ) -> ABIService:
         """
         Provide ABI service.
@@ -75,13 +80,15 @@ class BlockchainProvider(Provider):
         ----------
         cache_service : CacheService
             Cache service instance
+        logger : logging.Logger
+            Logger instance
             
         Returns
         -------
         ABIService
             ABI service instance
         """
-        return ABIService(cache_service=cache_service)
+        return ABIService(cache_service=cache_service, logger=logger)
     
     @provide(scope=Scope.REQUEST)
     def get_wallet_balance_use_case(

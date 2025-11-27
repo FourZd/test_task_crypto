@@ -130,7 +130,7 @@ class GetContractEventsUseCase:
             return EventsResponse(**cached)
         
         api_key = self.settings.snowtrace_api_key if network == "avalanche" else self.settings.etherscan_api_key
-        abi = await self.abi_service.get_abi(contract_address, network, api_key)
+        abi = await self.abi_service.get_abi(contract_address, network, api_key, web3_client)
         
         events = await self.web3_service.get_contract_events(
             contract_address=contract_address,
