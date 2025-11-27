@@ -22,6 +22,8 @@ class Settings(BaseSettings):
         Snowtrace API key for fetching ABIs (optional)
     etherscan_api_key : str
         Etherscan API key for fetching ABIs (optional)
+    ankr_api_key : str
+        Ankr API key for RPC access
     """
     
     rpc_base_url: str = "https://rpc.ankr.com"
@@ -33,6 +35,7 @@ class Settings(BaseSettings):
     
     snowtrace_api_key: str
     etherscan_api_key: str
+    ankr_api_key: str
 
     model_config = SettingsConfigDict(
         env_file=os.getenv("ENV_FILE", ".env"),
@@ -52,11 +55,11 @@ class Settings(BaseSettings):
         Returns
         -------
         str
-            Full RPC URL
+            Full RPC URL with API key
         """
         network_paths = {
             "avalanche": "avalanche",
             "ethereum": "eth"
         }
         network_path = network_paths.get(network, network)
-        return f"{self.rpc_base_url}/{network_path}"
+        return f"{self.rpc_base_url}/{network_path}/{self.ankr_api_key}"

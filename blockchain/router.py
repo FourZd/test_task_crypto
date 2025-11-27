@@ -24,21 +24,7 @@ async def get_wallet_balance(
         GetWalletBalanceUseCase, FromComponent("blockchain")
     ]
 ) -> BalanceResponse:
-    """
-    Get wallet balance at specific block.
-    
-    Parameters
-    ----------
-    request : GetBalanceRequest
-        Request with wallet address, block number and network
-    use_case : GetWalletBalanceUseCase
-        Use case for getting wallet balance
-        
-    Returns
-    -------
-    BalanceResponse
-        Wallet balance information
-    """
+    """Get wallet balance at specific block."""
     return await use_case(
         wallet_address=request.wallet_address,
         block_number=request.block_number,
@@ -54,21 +40,7 @@ async def get_contract_events(
         GetContractEventsUseCase, FromComponent("blockchain")
     ]
 ) -> EventsResponse:
-    """
-    Get all contract events from specified block to current.
-    
-    Parameters
-    ----------
-    request : GetEventsRequest
-        Request with contract address, starting block and network
-    use_case : GetContractEventsUseCase
-        Use case for getting contract events
-        
-    Returns
-    -------
-    EventsResponse
-        Contract events information
-    """
+    """Get all contract events from specified block to current."""
     return await use_case(
         contract_address=request.contract_address,
         from_block=request.from_block,
