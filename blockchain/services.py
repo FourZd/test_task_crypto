@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import hashlib
 from web3 import AsyncWeb3
 from blockchain.entities import WalletBalanceEntity, ContractEventEntity
-
+from core.redis.providers import CacheService
 
 class Web3Service:
     """
@@ -14,14 +15,18 @@ class Web3Service:
         Dictionary of Web3 clients for different networks
     logger : logging.Logger
         Logger instance
+    cache_service : CacheService
+        Cache service for caching chunk results
     """
     
     def __init__(
         self, web3_clients: dict[str, AsyncWeb3], 
-        logger: logging.Logger
+        logger: logging.Logger,
+        cache_service: CacheService
     ):
         self.web3_clients = web3_clients
         self.logger = logger
+        self.cache = cache_service
     
     def _get_client(self, network: str) -> AsyncWeb3:
         """
@@ -117,6 +122,14 @@ class Web3Service:
         contract = web3.eth.contract(address=checksum_address, abi=contract_abi)
         event_abis = [abi for abi in contract_abi if abi.get('type') == 'event']
         
+        topics_filter = None
+        if event_abis:
+            topics_filter = []
+            for event_abi in event_abis:
+                event = getattr(contract.events, event_abi['name'], None)
+                if event and hasattr(event, 'event_signature_hash'):
+                    topics_filter.append(event.event_signature_hash)
+        
         self.logger.info(f"Contract: {contract_address}, Network: {network}")
         self.logger.info(f"Total ABI items: {len(contract_abi)}")
         self.logger.info(f"Event ABIs found: {len(event_abis)}")
@@ -128,52 +141,48 @@ class Web3Service:
                 if event and hasattr(event, 'event_signature_hash'):
                     self.logger.info(f"Event '{event_abi['name']}' signature hash: {event.event_signature_hash}")
         
-        chunk_size = 2048
+        chunk_size = 2000
         total_chunks = (current_block - from_block) // chunk_size + 1
         total_blocks = current_block - from_block + 1
         self.logger.info(f"Fetching logs from block {from_block} to {current_block} (total blocks: {total_blocks}, chunks: {total_chunks})")
         
-        # Ограничиваем количество параллельных запросов чтобы не перегрузить RPC
-        semaphore = asyncio.Semaphore(50)
-        
         batch_size = 100
-        all_chunks_results = []
         
-        chunk_ranges = []
-        for start in range(from_block, current_block + 1, chunk_size):
-            end = min(start + chunk_size - 1, current_block)
-            chunk_ranges.append((start, end))
+        chunks_results = []
+        total_batches = (total_chunks + batch_size - 1) // batch_size
         
-        for batch_idx in range(0, len(chunk_ranges), batch_size):
-            batch_ranges = chunk_ranges[batch_idx:batch_idx + batch_size]
-            current_batch_num = batch_idx // batch_size + 1
-            total_batches = (len(chunk_ranges) + batch_size - 1) // batch_size
+        chunk_idx = 0
+        batch_tasks = []
+        
+        for start_block in range(from_block, current_block + 1, chunk_size):
+            if chunk_idx > 0 and chunk_idx % batch_size == 0:
+                self.logger.info(f"Processing batch {chunk_idx//batch_size}/{total_batches}: {len(batch_tasks)} chunks")
+                batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                chunks_results.extend(batch_results)
+                
+                success = sum(1 for r in batch_results if not isinstance(r, Exception))
+                errors = len(batch_results) - success
+                self.logger.info(f"Batch {chunk_idx//batch_size}/{total_batches} completed: {success} successful, {errors} errors")
+                
+                batch_tasks = []
             
-            self.logger.info(
-                f"Processing batch {current_batch_num}/{total_batches}: "
-                f"chunks {batch_idx + 1}-{min(batch_idx + batch_size, len(chunk_ranges))} of {len(chunk_ranges)}"
+            end_block = min(start_block + chunk_size - 1, current_block)
+            batch_tasks.append(self._fetch_logs_chunk(
+                web3, checksum_address, start_block, end_block, 
+                network, topics_filter)
             )
-            
-            tasks = []
-            for start, end in batch_ranges:
-                tasks.append(self._fetch_logs_chunk_with_semaphore(
-                    semaphore, web3, checksum_address, start, end)
-                )
-            
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            all_chunks_results.extend(batch_results)
-            
-            chunks_processed = len(all_chunks_results)
-            blocks_processed = min(chunks_processed * chunk_size, total_blocks)
-            progress_pct = (chunks_processed / len(chunk_ranges)) * 100
-            
-            self.logger.info(
-                f"Batch {current_batch_num}/{total_batches} completed: "
-                f"{chunks_processed}/{len(chunk_ranges)} chunks processed ({progress_pct:.1f}%), "
-                f"~{blocks_processed}/{total_blocks} blocks scanned"
-            )
+            chunk_idx += 1
         
-        chunks_results = all_chunks_results
+        if batch_tasks:
+            self.logger.info(f"Processing final batch {total_batches}/{total_batches}: {len(batch_tasks)} chunks")
+            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            chunks_results.extend(batch_results)
+            
+            success = sum(1 for r in batch_results if not isinstance(r, Exception))
+            errors = len(batch_results) - success
+            self.logger.info(f"Final batch completed: {success} successful, {errors} errors")
+        
+        self.logger.info(f"Completed fetching {len(chunks_results)} chunks total")
         
         total_logs = 0
         error_count = 0
@@ -239,21 +248,20 @@ class Web3Service:
         
         return events
     
-    async def _fetch_logs_chunk_with_semaphore(
+    async def _fetch_logs_chunk(
         self,
-        semaphore: asyncio.Semaphore,
         web3: AsyncWeb3,
         contract_address: str,
         from_block: int,
-        to_block: int
+        to_block: int,
+        network: str,
+        topics_filter: list[str] | None = None
     ) -> list:
         """
-        Fetch logs for a specific block range with semaphore control.
+        Fetch logs for a specific block range with caching.
         
         Parameters
         ----------
-        semaphore : asyncio.Semaphore
-            Semaphore to limit concurrent requests
         web3 : AsyncWeb3
             Web3 client instance
         contract_address : str
@@ -262,18 +270,64 @@ class Web3Service:
             Starting block number
         to_block : int
             Ending block number
+        network : str
+            Network name
+        topics_filter : list[str] | None
+            List of topic hashes to filter
             
         Returns
         -------
         list
             List of log entries
         """
-        async with semaphore:
-            return await web3.eth.get_logs({
-                'address': contract_address,
-                'fromBlock': from_block,
-                'toBlock': to_block
-            })
+        cache_key_data = f"{network}:{contract_address}:{from_block}:{to_block}:{topics_filter}"
+        cache_key = f"logs_chunk:{hashlib.md5(cache_key_data.encode()).hexdigest()}"
+        
+        if self.cache:
+            try:
+                cached = await self.cache.get(cache_key)
+                if cached and isinstance(cached, dict) and 'logs' in cached:
+                    self.logger.debug(f"Cache hit for chunk {from_block}-{to_block}")
+                    return cached['logs']
+            except Exception as e:
+                self.logger.debug(f"Cache read error: {e}")
+        
+        filter_params = {
+            'address': contract_address,
+            'fromBlock': from_block,
+            'toBlock': to_block
+        }
+        
+        if topics_filter:
+            filter_params['topics'] = [topics_filter]
+        
+        try:
+            logs = await web3.eth.get_logs(filter_params)
+            
+            if logs:
+                self.logger.debug(f"Chunk {from_block}-{to_block}: found {len(logs)} logs")
+            
+            if self.cache and logs:
+                try:
+                    serialized_logs = [
+                        {
+                            'address': log['address'],
+                            'topics': [t.hex() if hasattr(t, 'hex') else t for t in log['topics']],
+                            'data': log['data'].hex() if hasattr(log['data'], 'hex') else log['data'],
+                            'blockNumber': log['blockNumber'],
+                            'transactionHash': log['transactionHash'].hex() if hasattr(log['transactionHash'], 'hex') else log['transactionHash'],
+                            'logIndex': log['logIndex']
+                        }
+                        for log in logs
+                    ]
+                    await self.cache.set(cache_key, {'logs': serialized_logs}, ttl=3600)
+                except Exception as e:
+                    self.logger.debug(f"Cache write error: {e}")
+            
+            return logs
+        except Exception as e:
+            self.logger.warning(f"Error fetching logs for chunk {from_block}-{to_block}: {e}")
+            raise
     
     def _serialize_value(self, value: any) -> any:
         """

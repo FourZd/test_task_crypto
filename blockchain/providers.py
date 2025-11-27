@@ -46,7 +46,8 @@ class BlockchainProvider(Provider):
         web3_clients: Annotated[
             dict[str, AsyncWeb3], FromComponent("blockchain")
         ],
-        logger: Annotated[logging.Logger, FromComponent("logger")]
+        logger: Annotated[logging.Logger, FromComponent("logger")],
+        cache_service: Annotated[CacheService, FromComponent("cache")]
     ) -> Web3Service:
         """
         Provide Web3 service.
@@ -57,13 +58,19 @@ class BlockchainProvider(Provider):
             Dictionary of Web3 clients
         logger : logging.Logger
             Logger instance
+        cache_service : CacheService
+            Cache service instance for chunk caching
             
         Returns
         -------
         Web3Service
             Web3 service instance
         """
-        return Web3Service(web3_clients=web3_clients, logger=logger)
+        return Web3Service(
+            web3_clients=web3_clients, 
+            logger=logger, 
+            cache_service=cache_service
+        )
     
     @provide(scope=Scope.APP)
     def get_abi_service(
