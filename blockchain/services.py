@@ -142,47 +142,106 @@ class Web3Service:
                     self.logger.info(f"Event '{event_abi['name']}' signature hash: {event.event_signature_hash}")
         
         chunk_size = 2000
-        total_chunks = (current_block - from_block) // chunk_size + 1
         total_blocks = current_block - from_block + 1
-        self.logger.info(f"Fetching logs from block {from_block} to {current_block} (total blocks: {total_blocks}, chunks: {total_chunks})")
+        estimated_chunks = total_blocks // chunk_size
+        self.logger.info(f"Fetching logs from block {from_block} to {current_block} (total blocks: {total_blocks:,}, estimated chunks: {estimated_chunks:,})")
         
         batch_size = 100
-        
         chunks_results = []
-        total_batches = (total_chunks + batch_size - 1) // batch_size
         
-        chunk_idx = 0
+        # Adaptive chunking: если много пустых чанков подряд — делаем большие прыжки
+        empty_chunks_in_row = 0
+        skip_multiplier = 1
+        
+        current_pos = from_block
         batch_tasks = []
+        processed_chunks = 0
+        total_chunks_with_logs = 0
+        total_empty_chunks = 0
+        batch_number = 0
         
-        for start_block in range(from_block, current_block + 1, chunk_size):
-            if chunk_idx > 0 and chunk_idx % batch_size == 0:
-                self.logger.info(f"Processing batch {chunk_idx//batch_size}/{total_batches}: {len(batch_tasks)} chunks")
+        while current_pos <= current_block:
+            if len(batch_tasks) >= batch_size:
+                batch_number += 1
+                blocks_covered = current_pos - from_block
+                progress_pct = (blocks_covered / total_blocks) * 100
+                self.logger.info(f"Processing batch #{batch_number}: {len(batch_tasks)} chunks (progress: {progress_pct:.1f}%, blocks: {blocks_covered:,}/{total_blocks:,})")
                 batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                
+                # Анализируем результаты для adaptive chunking
+                batch_empty = 0
+                batch_with_logs = 0
+                for result in batch_results:
+                    if isinstance(result, Exception):
+                        continue
+                    if len(result) == 0:
+                        batch_empty += 1
+                    else:
+                        batch_with_logs += 1
+                
                 chunks_results.extend(batch_results)
+                total_chunks_with_logs += batch_with_logs
+                total_empty_chunks += batch_empty
                 
                 success = sum(1 for r in batch_results if not isinstance(r, Exception))
                 errors = len(batch_results) - success
-                self.logger.info(f"Batch {chunk_idx//batch_size}/{total_batches} completed: {success} successful, {errors} errors")
+                self.logger.info(
+                    f"Batch #{batch_number} completed: {success} successful, {errors} errors, "
+                    f"{batch_with_logs} with logs, {batch_empty} empty "
+                    f"(total: {total_chunks_with_logs} with logs, {total_empty_chunks} empty)"
+                )
+                
+                # Adaptive logic: если батч полностью пустой — увеличиваем skip
+                if batch_empty == success and batch_empty > 0:
+                    empty_chunks_in_row += batch_empty
+                    if empty_chunks_in_row >= 50:
+                        skip_multiplier = min(skip_multiplier * 2, 10)
+                        self.logger.info(f"No events in {empty_chunks_in_row} chunks, increasing skip to {skip_multiplier}x")
+                else:
+                    # Нашли события — возвращаем нормальный режим
+                    if skip_multiplier > 1:
+                        self.logger.info(f"Events found, returning to normal chunking")
+                    empty_chunks_in_row = 0
+                    skip_multiplier = 1
                 
                 batch_tasks = []
             
-            end_block = min(start_block + chunk_size - 1, current_block)
+            # Создаём задачу для текущего чанка
+            end_block = min(current_pos + chunk_size - 1, current_block)
             batch_tasks.append(self._fetch_logs_chunk(
-                web3, checksum_address, start_block, end_block, 
+                web3, checksum_address, current_pos, end_block, 
                 network, topics_filter)
             )
-            chunk_idx += 1
+            
+            processed_chunks += 1
+            # Двигаемся вперёд с учётом skip_multiplier
+            current_pos += chunk_size * skip_multiplier
         
+        # Обрабатываем последний батч
         if batch_tasks:
-            self.logger.info(f"Processing final batch {total_batches}/{total_batches}: {len(batch_tasks)} chunks")
+            batch_number += 1
+            self.logger.info(f"Processing final batch #{batch_number}: {len(batch_tasks)} chunks")
             batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            
+            batch_with_logs = sum(1 for r in batch_results if not isinstance(r, Exception) and len(r) > 0)
+            batch_empty = sum(1 for r in batch_results if not isinstance(r, Exception) and len(r) == 0)
+            
             chunks_results.extend(batch_results)
+            total_chunks_with_logs += batch_with_logs
+            total_empty_chunks += batch_empty
             
             success = sum(1 for r in batch_results if not isinstance(r, Exception))
             errors = len(batch_results) - success
-            self.logger.info(f"Final batch completed: {success} successful, {errors} errors")
+            self.logger.info(
+                f"Final batch #{batch_number} completed: {success} successful, {errors} errors, "
+                f"{batch_with_logs} with logs, {batch_empty} empty"
+            )
         
-        self.logger.info(f"Completed fetching {len(chunks_results)} chunks total")
+        self.logger.info(
+            f"✓ Completed fetching {len(chunks_results)} chunks total: "
+            f"{total_chunks_with_logs} with logs, {total_empty_chunks} empty, "
+            f"{len(chunks_results) - total_chunks_with_logs - total_empty_chunks} errors"
+        )
         
         total_logs = 0
         error_count = 0
