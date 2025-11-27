@@ -259,7 +259,9 @@ class Web3Service:
                 decoded_args = {}
                 
                 if log.get('topics'):
-                    event_signature_hash = log['topics'][0].hex()
+                    # Поддержка как свежих логов (HexBytes), так и из кеша (str)
+                    topic = log['topics'][0]
+                    event_signature_hash = topic.hex() if hasattr(topic, 'hex') else topic
                     
                     matched = False
                     for event_abi in event_abis:
@@ -274,8 +276,8 @@ class Web3Service:
                                 except Exception as e:
                                     self.logger.warning(f"Failed to decode event {event_abi['name']}: {e}")
                                     decoded_args = {
-                                        'topics': [t.hex() for t in log['topics']],
-                                        'data': log['data'].hex() if log['data'] else '0x'
+                                        'topics': [t.hex() if hasattr(t, 'hex') else t for t in log['topics']],
+                                        'data': log['data'].hex() if hasattr(log['data'], 'hex') else log['data'] if log['data'] else '0x'
                                     }
                                 break
                     
@@ -284,13 +286,17 @@ class Web3Service:
                 
                 if event_name == 'UnknownEvent':
                     decoded_args = {
-                        'topics': [t.hex() for t in log['topics']],
-                        'data': log['data'].hex() if log['data'] else '0x'
+                        'topics': [t.hex() if hasattr(t, 'hex') else t for t in log['topics']],
+                        'data': log['data'].hex() if hasattr(log['data'], 'hex') else log['data'] if log['data'] else '0x'
                     }
+                
+                # Поддержка как свежих логов, так и из кеша
+                tx_hash = log['transactionHash']
+                transaction_hash = tx_hash.hex() if hasattr(tx_hash, 'hex') else tx_hash
                 
                 events.append(
                     ContractEventEntity(
-                        transaction_hash=log['transactionHash'].hex(),
+                        transaction_hash=transaction_hash,
                         block_number=log['blockNumber'],
                         log_index=log['logIndex'],
                         event_name=event_name,
